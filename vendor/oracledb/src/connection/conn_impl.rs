@@ -313,6 +313,15 @@ impl ConnImpl {
         self.client_ref.lock()?.rollback()
     }
 
+    /// Patched for SpelaionDB (PATCHED.md, 1): calls can be cancelled through
+    /// `flag`.
+    pub fn enable_cancel(
+        &self,
+        flag: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<(), Error> {
+        self.client_ref.lock()?.enable_cancel(flag)
+    }
+
     /// Sets the call timeout configured on the connection.
     pub fn set_call_timeout(
         &self,

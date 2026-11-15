@@ -29,12 +29,6 @@
 // sending and receiving messages.
 //-----------------------------------------------------------------------------
 
-#[cfg(unix)]
-use std::os::unix::io::AsRawFd;
-
-#[cfg(windows)]
-use std::os::windows::io::AsRawSocket;
-
 use pkcs8::DecodePrivateKey;
 use rustls::ClientConfig as TlsClientConfig;
 use rustls::ClientConnection as TlsClientConnection;
@@ -46,12 +40,13 @@ use rustls::pki_types::pem::PemObject;
 use rustls::sign::CertifiedKey;
 
 use std::cmp::min;
-use std::env;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use crate::config::Address;
 use crate::config::Config;
@@ -90,6 +85,9 @@ impl LowLevelTransport {
         config: &Config,
     ) -> Result<Self, Error> {
         let mut resolver = CustomClientCertResolver::new();
+        if let Some(pem) = config.tls_roots_pem() {
+            resolver.use_roots(pem)?;
+        }
         if let Some(wallet_location) = config.wallet_location() {
             resolver.populate(
                 wallet_location,
@@ -97,8 +95,15 @@ impl LowLevelTransport {
             )?;
         }
         let tls_config = resolver.get_tls_config()?;
+        // Patched for SpelaionDB (PATCHED.md, 2): a name rustls cannot use is an
+        // error, not a panic.
         let tls_server_name: rustls::pki_types::ServerName =
-            server_name.to_string().try_into().unwrap();
+            server_name.to_string().try_into().map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("{server_name:?} is not a host name TLS can check"),
+                )
+            })?;
         let conn = rustls::ClientConnection::new(
             Arc::new(tls_config),
             tls_server_name,
@@ -136,6 +141,27 @@ impl LowLevelTransport {
         Ok(stream.set_write_timeout(duration)?)
     }
 
+    /// Patched for SpelaionDB (PATCHED.md, 1): the read timeout alone.
+    fn set_read_timeout(&self, duration: Option<Duration>) -> Result<(), Error> {
+        let stream = match self {
+            Self::Tcp(s) => s,
+            Self::Tls(s) => &s.sock,
+        };
+        Ok(stream.set_read_timeout(duration)?)
+    }
+
+    /// Patched for SpelaionDB (PATCHED.md, 1): the write timeout alone.
+    fn set_write_timeout(
+        &self,
+        duration: Option<Duration>,
+    ) -> Result<(), Error> {
+        let stream = match self {
+            Self::Tcp(s) => s,
+            Self::Tls(s) => &s.sock,
+        };
+        Ok(stream.set_write_timeout(duration)?)
+    }
+
     /// Shuts down the low-level transport.
     fn shutdown(&mut self) -> Result<(), Error> {
         let stream = match self {
@@ -161,16 +187,22 @@ impl LowLevelTransport {
 
 pub(crate) struct Transport {
     low_level_transport: Option<LowLevelTransport>,
-    socket_num: String,
     max_packet_size: usize,
     read_buf: Vec<u8>,
     write_buf: Vec<u8>,
     residual_bytes: usize,
     last_packet_bytes: usize,
     full_packet_size: bool,
-    print_packets: bool,
-    op_num: usize,
+    // Patched for SpelaionDB (PATCHED.md, 1): set by a `CancelHandle`; checked
+    // every `CANCEL_TICK` while waiting for the database.
+    cancel: Option<Arc<AtomicBool>>,
+    // The call timeout, kept here once reads wake up every `CANCEL_TICK`.
+    call_timeout: Option<Duration>,
 }
+
+// Patched for SpelaionDB (PATCHED.md, 1): how often a read waiting for the
+// database wakes up to see whether its call was cancelled.
+const CANCEL_TICK: Duration = Duration::from_millis(100);
 
 // a custom client certificate resolver is required because the client
 // certificates supplied by Oracle Database are v1 certificates and rustls will
@@ -182,67 +214,12 @@ struct CustomClientCertResolver {
     root_store: Option<rustls::RootCertStore>,
 }
 
-// how many bytes should be included for each line of packet output
-const BYTES_PER_LINE: usize = 8;
-
 // PEM file header/footers
 const PEM_ENCRYPTED_PRIVATE_KEY_HEADER: &str =
     "-----BEGIN ENCRYPTED PRIVATE KEY-----";
 const PEM_ENCRYPTED_PRIVATE_KEY_FOOTER: &str =
     "-----END ENCRYPTED PRIVATE KEY-----";
 const PEM_UNENCRYPTED_PRIVATE_KEY_HEADER: &str = "-----BEGIN PRIVATE KEY-----";
-
-/// Returns the character to use for the given byte when displaying packet
-/// data.
-fn display_char(byte: u8) -> char {
-    let ch = byte as char;
-    if ch.is_ascii_alphanumeric() || ch.is_ascii_punctuation() {
-        ch
-    } else {
-        '.'
-    }
-}
-
-/// Returns a string representation of the socket number. Platform specific
-/// methods are used for this purpose.
-#[cfg(unix)]
-fn get_socket_num(stream: &TcpStream) -> String {
-    stream.as_raw_fd().to_string()
-}
-
-#[cfg(windows)]
-fn get_socket_num(stream: &TcpStream) -> String {
-    stream.as_raw_socket().to_string()
-}
-
-/// Prints packet data in a way convenient for debugging.
-fn print_packet(operation: &str, data: &[u8]) {
-    let mut hex_values = Vec::<String>::with_capacity(BYTES_PER_LINE);
-    let mut display_values = Vec::<char>::with_capacity(BYTES_PER_LINE);
-    let mut output_lines = Vec::<String>::new();
-    let mut offset: usize = 0;
-    output_lines.push(String::from(operation));
-    while offset < data.len() {
-        hex_values.clear();
-        display_values.clear();
-        let end_index = min(offset + BYTES_PER_LINE, data.len());
-        let line_data = &data[offset..end_index];
-        for byte in line_data.iter() {
-            hex_values.push(format!("{:02X}", byte));
-            display_values.push(display_char(*byte));
-        }
-        while hex_values.len() < BYTES_PER_LINE {
-            hex_values.push(String::from("  "));
-            display_values.push(' ');
-        }
-        let hex_data = hex_values.join(" ");
-        let display_data = display_values.iter().collect::<String>();
-        let line = format!("{:0>4} : {} |{}|", offset, hex_data, display_data);
-        output_lines.push(line);
-        offset += BYTES_PER_LINE;
-    }
-    println!("{}\n", output_lines.join("\n"));
-}
 
 impl Transport {
     /// Extracts a packet from the data that has been received from the
@@ -258,23 +235,7 @@ impl Transport {
         }
         self.residual_bytes -= self.last_packet_bytes;
         let packet_buf = &self.read_buf[0..self.last_packet_bytes];
-        if self.print_packets {
-            self.op_num += 1;
-            let header = self.get_op_header("Receiving packet");
-            print_packet(&header, packet_buf);
-        }
         Some(Packet::new(packet_buf))
-    }
-
-    /// Returns the op header used when displaying packet data.
-    fn get_op_header(&self, op: &str) -> String {
-        let formatted_date =
-            chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.6f");
-
-        format!(
-            "{} {} [op {}] on socket {}",
-            formatted_date, op, self.op_num, self.socket_num
-        )
     }
 
     /// Returns the size of the packet by examining the packet header. The
@@ -306,11 +267,6 @@ impl Transport {
             return Err(Error::not_connected());
         }
         let data = &self.write_buf[..];
-        if self.print_packets {
-            self.op_num += 1;
-            let header = self.get_op_header("Sending packet");
-            print_packet(&header, data);
-        }
         if let Some(t) = self.low_level_transport.as_mut() {
             t.write_all(data)?;
         }
@@ -319,11 +275,6 @@ impl Transport {
 
     /// Closes the TCP connection to the database.
     pub(crate) fn close(&mut self) -> Result<(), Error> {
-        if self.print_packets {
-            self.op_num += 1;
-            let header = self.get_op_header("Disconnecting transport");
-            println!("{}\n", header);
-        }
         self.low_level_transport
             .take()
             .ok_or_else(Error::not_connected)
@@ -340,10 +291,14 @@ impl Transport {
         stream.set_nodelay(true)?;
         stream.set_read_timeout(None)?;
         stream.set_write_timeout(None)?;
-        self.socket_num = get_socket_num(&stream);
         self.low_level_transport = Some(LowLevelTransport::Tcp(stream));
         if address.protocol() == "tcps" {
-            self.negotiate_tls(address.host(), config)?;
+            // Patched for SpelaionDB (PATCHED.md, 2): the certificate is checked
+            // against the configured server name, not the address connected to
+            // (a tunnel's local end).
+            let server_name =
+                config.tls_server_name().unwrap_or(address.host()).to_string();
+            self.negotiate_tls(&server_name, config)?;
         }
         Ok(())
     }
@@ -364,11 +319,6 @@ impl Transport {
         server_name: &str,
         config: &Config,
     ) -> Result<(), Error> {
-        if self.print_packets {
-            self.op_num += 1;
-            let header = self.get_op_header("Negotiate TLS");
-            println!("{}\n", header);
-        }
         let low_level_transport = self.low_level_transport.take().unwrap();
         self.low_level_transport =
             Some(low_level_transport.negotiate_tls(server_name, config)?);
@@ -379,15 +329,14 @@ impl Transport {
     pub(crate) fn new() -> Self {
         Self {
             low_level_transport: None,
-            socket_num: String::new(),
             max_packet_size: 0,
             read_buf: Vec::new(),
             write_buf: Vec::new(),
             residual_bytes: 0,
             last_packet_bytes: 0,
             full_packet_size: false,
-            print_packets: env::var_os("RSO_DEBUG_PACKETS").is_some(),
-            op_num: 0,
+            cancel: None,
+            call_timeout: None,
         }
     }
 
@@ -400,11 +349,34 @@ impl Transport {
             self.read_buf.copy_within(start_pos..end_pos, 0);
             self.last_packet_bytes = 0;
         }
+        let started = Instant::now();
         loop {
             if let Some(packet) = self.extract_packet() {
                 return Ok(packet);
             }
-            let num_bytes = self.read_packet()?;
+            let num_bytes = match self.read_packet() {
+                Ok(num_bytes) => num_bytes,
+                // Patched for SpelaionDB (PATCHED.md, 1): with cancels enabled a
+                // read wakes up every `CANCEL_TICK`. The bytes read so far stay
+                // in `read_buf`, so reading goes on where it stopped unless the
+                // call was cancelled or its timeout has passed.
+                Err(err) if err.is_call_timeout_exceeded() => {
+                    let Some(flag) = &self.cancel else {
+                        return Err(err);
+                    };
+                    if flag.swap(false, Ordering::SeqCst) {
+                        return Err(Error::cancelled());
+                    }
+                    if self
+                        .call_timeout
+                        .is_some_and(|limit| started.elapsed() >= limit)
+                    {
+                        return Err(err);
+                    }
+                    continue;
+                }
+                Err(err) => return Err(err),
+            };
             if num_bytes == 0 {
                 self.low_level_transport = None;
                 break;
@@ -469,11 +441,53 @@ impl Transport {
         self.max_packet_size = size;
     }
 
+    /// Patched for SpelaionDB (PATCHED.md, 1): from now on a read waiting for
+    /// the database wakes up every `CANCEL_TICK` and stops the call when `flag`
+    /// is set. Writes keep the call timeout.
+    pub(crate) fn enable_cancel(
+        &mut self,
+        flag: Arc<AtomicBool>,
+    ) -> Result<(), Error> {
+        let transport = self
+            .low_level_transport
+            .as_ref()
+            .ok_or_else(Error::not_connected)?;
+        self.call_timeout = transport.get_read_timeout()?;
+        transport.set_read_timeout(Some(CANCEL_TICK))?;
+        self.cancel = Some(flag);
+        Ok(())
+    }
+
+    /// Patched for SpelaionDB (PATCHED.md, 1): forgets a cancel asked for
+    /// before the call that is starting.
+    pub(crate) fn clear_cancel(&self) {
+        if let Some(flag) = &self.cancel {
+            flag.store(false, Ordering::SeqCst);
+        }
+    }
+
+    /// Returns the call timeout: the socket's read timeout, or the one kept
+    /// apart once cancels are enabled (PATCHED.md, 1).
+    pub(crate) fn get_call_timeout(&self) -> Result<Option<Duration>, Error> {
+        if self.cancel.is_some() {
+            return Ok(self.call_timeout);
+        }
+        self.get_read_timeout()
+    }
+
     /// Sets the read and write timeouts for the transport.
     pub(crate) fn set_timeout(
-        &self,
+        &mut self,
         duration: Option<std::time::Duration>,
     ) -> Result<(), Error> {
+        if self.cancel.is_some() {
+            self.call_timeout = duration;
+            return self
+                .low_level_transport
+                .as_ref()
+                .ok_or_else(Error::not_connected)
+                .and_then(|t| t.set_write_timeout(duration));
+        }
         self.low_level_transport
             .as_ref()
             .ok_or_else(Error::not_connected)
@@ -496,8 +510,9 @@ impl CustomClientCertResolver {
     /// Creates a new empty structure and returns it.
     fn new() -> Self {
         Self {
+            // Patched for SpelaionDB (PATCHED.md, 4): ring, never aws-lc-rs.
             provider: CryptoProvider::get_default().cloned().unwrap_or_else(
-                || Arc::new(rustls::crypto::aws_lc_rs::default_provider()),
+                || Arc::new(rustls::crypto::ring::default_provider()),
             ),
             key: None,
             root_store: Some(rustls::RootCertStore {
@@ -588,6 +603,17 @@ impl CustomClientCertResolver {
             }
         }
 
+        Ok(())
+    }
+
+    /// Patched for SpelaionDB (PATCHED.md, 2): trusts only the PEM certificates
+    /// in `pem`, instead of the built-in roots.
+    fn use_roots(&mut self, pem: &[u8]) -> Result<(), Error> {
+        let mut root_store = rustls::RootCertStore::empty();
+        for result in CertificateDer::pem_slice_iter(pem) {
+            root_store.add(result?)?;
+        }
+        self.root_store = Some(root_store);
         Ok(())
     }
 }

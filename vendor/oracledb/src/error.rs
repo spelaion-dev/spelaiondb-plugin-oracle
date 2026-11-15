@@ -43,6 +43,9 @@ use crate::response::ResponseLocation;
 pub enum ErrorKind {
     ArrowOperation,
     CallTimeoutExceeded,
+    // Patched for SpelaionDB (PATCHED.md, 1): the call was stopped through a
+    // `CancelHandle`.
+    Cancelled,
     CannotConvertToArrowDecimal(String, u8, i8),
     ColumnTruncated(usize, usize),
     DbError(DbError),
@@ -201,6 +204,9 @@ impl fmt::Display for Error {
             }
             ErrorKind::CallTimeoutExceeded => {
                 fmt.write_str("the configured call timeout was exceeded")?
+            }
+            ErrorKind::Cancelled => {
+                fmt.write_str("the call was cancelled")?
             }
             ErrorKind::CannotConvertToArrowDecimal(num, precision, scale) => {
                 write!(
@@ -682,6 +688,20 @@ impl Error {
     /// error.
     pub(crate) fn is_call_timeout_exceeded(&self) -> bool {
         self.kind() == &ErrorKind::CallTimeoutExceeded
+    }
+
+    /// Patched for SpelaionDB (PATCHED.md, 1): the call was cancelled.
+    pub(crate) fn cancelled() -> Error {
+        Error::new(ErrorKind::Cancelled, None)
+    }
+
+    /// Patched for SpelaionDB (PATCHED.md, 1): a call timeout or a cancel,
+    /// both of which break the call and reset the connection.
+    pub(crate) fn breaks_call(&self) -> bool {
+        matches!(
+            self.kind(),
+            ErrorKind::CallTimeoutExceeded | ErrorKind::Cancelled
+        )
     }
 
     /// Returns a boolean indicating if the error is an out of data error.

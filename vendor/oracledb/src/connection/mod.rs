@@ -52,6 +52,19 @@ use crate::pool::PoolContentsRef;
 use crate::row::Row;
 use crate::statement::StatementBuilder;
 
+/// Patched for SpelaionDB (PATCHED.md, 1): cancels the call running on the
+/// connection it came from ([Connection::cancel_handle]).
+#[derive(Clone, Debug)]
+pub struct CancelHandle(Arc<std::sync::atomic::AtomicBool>);
+
+impl CancelHandle {
+    /// Asks the running call to stop; it stops within a tenth of a second of
+    /// the database's next answer or of this call, whichever comes first.
+    pub fn cancel(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// Represents a connection to the database. This can be either a standalone
 /// connection created by calling [connect()](`crate::connect`) or a pooled
 /// connection created by calling [Pool::acquire()](`crate::Pool::acquire`)
@@ -100,6 +113,17 @@ impl Connection {
             conn_impl: Some(conn_impl),
             pool_contents_ref: Some(pool_contents_ref.clone()),
         }
+    }
+
+    /// Patched for SpelaionDB (PATCHED.md, 1): a handle that cancels, from
+    /// another thread, the call this connection is waiting on. The call breaks
+    /// as on a call timeout (an interrupt, then a reset) and fails with
+    /// `ErrorKind::Cancelled`; the connection stays usable. A cancel asked for
+    /// while no call is running reaches no later call.
+    pub fn cancel_handle(&self) -> Result<CancelHandle, Error> {
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.get_impl()?.enable_cancel(flag.clone())?;
+        Ok(CancelHandle(flag))
     }
 
     /// Returns the "call timeout" value currently in effect by the connection

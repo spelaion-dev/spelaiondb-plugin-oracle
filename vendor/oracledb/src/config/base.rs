@@ -60,9 +60,40 @@ pub struct Config {
     wallet_location: Option<String>,
     wallet_password: Option<SecretValue>,
     transport_connect_timeout: Option<Duration>,
+    // Patched for SpelaionDB (PATCHED.md, 2): the name the server's certificate
+    // is checked against, when it is not the host connected to.
+    tls_server_name: Option<String>,
+    // Patched for SpelaionDB (PATCHED.md, 2): PEM certificates trusted instead
+    // of the built-in roots.
+    tls_roots_pem: Option<Vec<u8>>,
 }
 
 impl Config {
+    /// Patched for SpelaionDB (PATCHED.md, 2): checks the server's certificate
+    /// against `value` instead of the host in the connect string, so a database
+    /// reached through a local port forward is still verified by its name.
+    pub fn set_tls_server_name(mut self, value: impl Into<String>) -> Self {
+        self.tls_server_name = Some(value.into());
+        self
+    }
+
+    /// The name the server's certificate is checked against, if set.
+    pub fn tls_server_name(&self) -> Option<&str> {
+        self.tls_server_name.as_deref()
+    }
+
+    /// Patched for SpelaionDB (PATCHED.md, 2): trusts only the certificates in
+    /// `pem` (one or more PEM certificates) instead of the built-in roots.
+    pub fn set_tls_roots_pem(mut self, pem: impl Into<Vec<u8>>) -> Self {
+        self.tls_roots_pem = Some(pem.into());
+        self
+    }
+
+    /// The PEM certificates trusted instead of the built-in roots, if set.
+    pub(crate) fn tls_roots_pem(&self) -> Option<&[u8]> {
+        self.tls_roots_pem.as_deref()
+    }
+
     /// Returns the new password to use, if one was configured.
     pub(crate) fn get_new_password_bytes(&self) -> Option<Vec<u8>> {
         self.new_password.as_ref().map(|s| s.get_value())
@@ -371,6 +402,8 @@ impl Default for Config {
             wallet_location: None,
             wallet_password: None,
             transport_connect_timeout: None,
+            tls_server_name: None,
+            tls_roots_pem: None,
         }
     }
 }
