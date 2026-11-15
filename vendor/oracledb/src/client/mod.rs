@@ -116,9 +116,6 @@ impl Client {
         message: &mut impl Message,
     ) -> Result<Response, Error> {
         message.pre_process(self);
-        // Patched for SpelaionDB (PATCHED.md, 1): a cancel asked for before this
-        // call started never reaches it.
-        self.transport.clear_cancel();
         self.send_message(message)?;
         let mut response = Response::new();
         if let Err(e) = self.receive_response(message, &mut response) {
@@ -144,6 +141,12 @@ impl Client {
     /// Processes the call status flags returned by the server.
     fn process_call_status(&mut self, call_status: u32) {
         self.transaction_in_progress = call_status & 0x00000002 != 0
+    }
+
+    /// Patched for SpelaionDB (PATCHED.md, 5): the transaction flag of the last
+    /// call's status.
+    pub(crate) fn transaction_in_progress(&self) -> bool {
+        self.transaction_in_progress
     }
 
     /// Processes a single message and receives back the response. If the
@@ -260,6 +263,16 @@ impl Client {
     /// caller. Note that some databases return multiple reset markers so
     /// these are also accommodated.
     fn reset(&mut self, reset_received: bool) -> Result<Packet, Error> {
+        // Patched for SpelaionDB (PATCHED.md, 1): a cancel asked for again while
+        // resetting must not interrupt the reset, which would lose the
+        // connection.
+        self.transport.set_honour_cancel(false);
+        let result = self.reset_unless_lost(reset_received);
+        self.transport.set_honour_cancel(true);
+        result
+    }
+
+    fn reset_unless_lost(&mut self, reset_received: bool) -> Result<Packet, Error> {
         self.send_marker(constants::MARKER_TYPE_RESET)?;
         let mut reset_received = reset_received;
         loop {

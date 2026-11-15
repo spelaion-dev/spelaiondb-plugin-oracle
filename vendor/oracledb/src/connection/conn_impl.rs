@@ -243,6 +243,11 @@ impl ConnImpl {
         self.client_ref.lock()?.ping()
     }
 
+    /// Patched for SpelaionDB (PATCHED.md, 5).
+    pub fn transaction_in_progress(&self) -> Result<bool, Error> {
+        Ok(self.client_ref.lock()?.transaction_in_progress())
+    }
+
     /// Executes a query against the database.
     pub fn query(
         &self,

@@ -63,6 +63,15 @@ impl CancelHandle {
     pub fn cancel(&self) {
         self.0.store(true, std::sync::atomic::Ordering::SeqCst);
     }
+
+    /// Forgets a cancel that reached no call. The application calls it before
+    /// each statement it starts, so a cancel meant for an earlier one, asked
+    /// for as it ended, does not stop this one. Fetching more rows of a query
+    /// is part of the same statement: a cancel asked for between two fetches
+    /// stops the next one.
+    pub fn reset(&self) {
+        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 /// Represents a connection to the database. This can be either a standalone
@@ -228,6 +237,13 @@ impl Connection {
     /// Pings the database.
     pub fn ping(&self) -> Result<(), Error> {
         self.get_impl()?.ping()
+    }
+
+    /// Patched for SpelaionDB (PATCHED.md, 5): whether the database said, at the
+    /// end of the last call, that a transaction is open on this session. No round
+    /// trip.
+    pub fn transaction_in_progress(&self) -> Result<bool, Error> {
+        self.get_impl()?.transaction_in_progress()
     }
 
     /// Executes a query against the database.
