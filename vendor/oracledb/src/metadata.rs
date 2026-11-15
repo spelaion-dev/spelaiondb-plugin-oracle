@@ -72,6 +72,9 @@ pub struct Metadata {
     object_type: Option<MetadataObjectType>,
     domain: Option<(String, String)>,
     annotations: Vec<(String, String)>,
+    // Patched for SpelaionDB (PATCHED.md, 6): a CLOB, NCLOB or BLOB fetched whole
+    // as LONG data keeps its declared type here, for `data_type()`.
+    lob_type: Option<&'static DbType>,
 }
 
 impl Metadata {
@@ -105,6 +108,7 @@ impl Metadata {
             object_type: None,
             domain: None,
             annotations: Vec::new(),
+            lob_type: None,
         }
     }
 
@@ -113,6 +117,7 @@ impl Metadata {
     pub(crate) fn define_metadata(&self) -> Metadata {
         let mut metadata = self.clone();
         metadata.max_size = 0;
+        metadata.lob_type = Some(self.db_type);
         metadata.db_type = match self.db_type {
             crate::DB_TYPE_BLOB => crate::DB_TYPE_LONG_RAW,
             crate::DB_TYPE_CLOB => crate::DB_TYPE_LONG,
@@ -142,6 +147,7 @@ impl Metadata {
             object_type: None,
             domain: None,
             annotations: Vec::new(),
+            lob_type: None,
         };
         let ora_type_num: u16 = resp.read_u8()?.into();
         resp.read_u8()?; // flags
@@ -413,6 +419,13 @@ impl Metadata {
     /// Returns a string representation of the data type as would be found in
     /// a create table statement.
     pub fn data_type(&self) -> String {
+        // Patched for SpelaionDB (PATCHED.md, 6): the declared type of a LOB that
+        // is fetched whole, not the LONG type it is read as.
+        if let Some(lob_type) = self.lob_type
+            && lob_type != self.db_type
+        {
+            return lob_type.ora_name.to_string();
+        }
         match self.db_type.ora_type_num {
             constants::ORA_TYPE_NUM_CHAR
             | constants::ORA_TYPE_NUM_VARCHAR
