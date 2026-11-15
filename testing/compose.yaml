@@ -1,0 +1,33 @@
+# The tests' servers: Oracle Database Free (the image's lite flavour) on 11521, and the same
+# database behind TLS on 12484 (TCPS, a certificate for oracle.spelaion.test signed by the CA
+# that `gen-keys.sh` writes). The lite image has no `orapki` to set TCPS up inside the
+# database, so a TLS proxy in front of it carries the TCPS session: the driver's TLS (the
+# handshake, the certificate and its name) is exactly what it is against a database listener.
+name: spelaion-plugin-oracle
+
+services:
+  oracle:
+    image: container-registry.oracle.com/database/free:latest-lite
+    environment:
+      ORACLE_PWD: spelaion-test-Pw1
+    ports:
+      - "127.0.0.1:11521:1521"
+    volumes:
+      - ./oracle/startup:/opt/oracle/scripts/startup:ro
+    healthcheck:
+      test: ["CMD", "/opt/oracle/checkDBStatus.sh"]
+      interval: 10s
+      timeout: 10s
+      retries: 60
+      start_period: 60s
+
+  tls:
+    image: haproxy:3.2-alpine
+    depends_on:
+      oracle:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:12484:2484"
+    volumes:
+      - ./tls/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      - ./keys/server.pem:/usr/local/etc/haproxy/server.pem:ro

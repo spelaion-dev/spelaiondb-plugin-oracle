@@ -1,83 +1,44 @@
-# spelaiondb-plugin-template
+# spelaiondb-plugin-oracle
 
-What a plugin of [SpelaionDB](https://github.com/spelaion-dev/spelaiondb) starts from, and the
-checks and the release every plugin of ours shares.
+Oracle Database for [SpelaionDB](https://github.com/spelaion-dev/spelaiondb), the desktop
+database client: the engine's driver, served to SpelaionDB as a plugin.
 
 SpelaionDB's engines are programs it starts and talks to over their standard input and output
-(its ADR-041). Each of ours lives in its own repository, `spelaiondb-plugin-<engine>`, and
-SpelaionDB pins by hash the exact release it was tested with (its ADR-042). This repository is
-two things:
+(its ADR-041). This is the one for Oracle. It is built here, in its own repository, and
+SpelaionDB pins by hash the exact release it was tested with (its ADR-042, ADR-055).
 
-- **A plugin to copy**: a made-up engine, `example`, with everything a plugin's repository
-  has: the driver (`src/lib.rs`), the program (`src/bin/`), the conformance test, `plugin.toml`,
-  the rules (`AGENTS.md`).
-- **The shared workflows**: `.github/workflows/plugin-ci.yml` and `plugin-release.yml`. Every
-  plugin calls them by commit, so a change to how plugins are checked or released is made
-  once, here.
-
-Protocol: [SpelaionDB's plugin protocol](https://github.com/spelaion-dev/spelaiondb/blob/dev/docs/plugin-protocol.md),
-version 1.0, experimental until SpelaionDB 1.0. License: Apache-2.0.
-
-## Creating a plugin's repository
-
-Creating the repository and protecting its branch is done by an owner of the organisation, or
-with their yes each time. A plugin's repository is created when its engine's work starts, not
-before.
-
-1. **Create `spelaion-dev/spelaiondb-plugin-<engine>` from this template** (public, Apache-2.0).
-2. **Rename.** `spelaiondb-plugin-example` → `spelaiondb-plugin-<engine>` in `Cargo.toml` (the
-   package, the binary and its path), in `src/bin/`, in the tests and in `README.md`; the library
-   (`spelaion_driver_example`) to your driver's name; `engines` in `plugin.toml`.
-3. **Put your driver in `src/`**, with its own tests in `tests/`. A driver that moves out of
-   SpelaionDB's repository comes whole, with its tests, and with the patched library it uses
-   (`vendor/<library>`, its `PATCHED.md`, and the `[patch.crates-io]` entry), which is then under
-   this repository's `CODEOWNERS`.
-4. **Point the two workflows at the shared ones**, by commit:
-
-   ```yaml
-   # .github/workflows/ci.yml
-   jobs:
-     ci:
-       uses: spelaion-dev/spelaiondb-plugin-template/.github/workflows/plugin-ci.yml@<commit>
-       with:
-         test-env: |
-           SPELAION_TEST_PG=127.0.0.1:15432
-
-   # .github/workflows/release.yml
-   jobs:
-     release:
-       permissions:
-         contents: write
-       uses: spelaion-dev/spelaiondb-plugin-template/.github/workflows/plugin-release.yml@<commit>
-   ```
-
-   and delete `plugin-ci.yml` and `plugin-release.yml` from the new repository: they live here.
-5. **If the tests need a server**, add an executable `ci/services.sh` that starts it (Docker
-   Compose, waiting until it is healthy) and name where it is in `test-env`. A test that needs
-   a server and does not find its variable is skipped and says so, as in SpelaionDB.
-   A patched library under `vendor/` is a crate of its own, which `cargo test` does not reach:
-   run its tests from an executable `ci/more-tests.sh`.
-6. **Protect `main`**: pull requests only, the checks of `CI` required, no force-push, no
-   deletion, owners' review for the files in `.github/CODEOWNERS`.
-7. **No secret, ever.** Nothing here signs anything: a release reaches users only when
-   SpelaionDB's repository pins its hashes.
-
-## Releasing a plugin
-
-Push a tag `vX.Y.Z` that is the version in `Cargo.toml`. The release builds the four platforms
-and its notes carry the pin for SpelaionDB's `plugins.toml`. Moving that pin is a pull request
-in SpelaionDB's repository, whose CI runs SpelaionDB's tests through that exact build.
+- **Protocol:** [SpelaionDB's plugin protocol](https://github.com/spelaion-dev/spelaiondb/blob/dev/docs/plugin-protocol.md),
+  version 1.1. Experimental until SpelaionDB 1.0.
+- **Engine:** `oracle`, over Oracle's own pure-Rust thin driver,
+  [`oracledb`](https://github.com/oracle/rust-oracledb) (its ADR-059). Nothing to install: no
+  Oracle client library. The driver is a pre-release, pinned exactly and patched here
+  (`vendor/oracledb/PATCHED.md`): cancel from another thread, TLS checked against the host name
+  when the database is reached through a tunnel, nothing ever printed, and no aws-lc.
+- **What thin mode cannot do,** and SpelaionDB says so when a connection fails: servers older
+  than Oracle 12.1, Native Network Encryption (use TLS instead) and operating-system
+  authentication.
+- **License:** Apache-2.0. The vendored driver is Oracle's (UPL-1.0 or Apache-2.0).
 
 ## Working on it
 
 ```bash
-cargo test
+ci/services.sh
 ```
 
-runs the protocol's conformance set against the example plugin's own program. To try a plugin
-with SpelaionDB, point a development build of it at the program
-(`SPELAION_DEV_PLUGIN_<ENGINE>=/path/to/the/program`, in SpelaionDB's repository; a release
-build ignores that variable).
+starts the test server (Oracle Database Free in Docker, with a TLS proxy in front of it and
+its certificates). It takes a minute or two the first time. Then
+
+```bash
+SPELAION_TEST_ORACLE=127.0.0.1:11521 SPELAION_TEST_ORACLE_TCPS=127.0.0.1:12484 cargo test
+```
+
+runs the type zoo, cancel, TLS and the protocol's conformance set against this plugin's own
+program. Without the variables the tests that need the server are skipped, which does not
+count as tested.
+
+To try a build with SpelaionDB, point a development build of it at the program
+(`SPELAION_DEV_PLUGIN_ORACLE=/path/to/target/debug/spelaiondb-plugin-oracle`, in SpelaionDB's
+repository; a release build ignores that variable).
 
 `AGENTS.md` has the rules. Reports and questions go to
 [SpelaionDB's issues](https://github.com/spelaion-dev/spelaiondb/issues).
