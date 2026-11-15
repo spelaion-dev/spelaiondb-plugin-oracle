@@ -6,8 +6,8 @@ This is the crates.io release of Oracle's thin driver (UPL-1.0 or Apache-2.0,
 through `[patch.crates-io]`, and only the library is kept: no examples, tests or
 binaries. The first commit that adds this folder holds the release as it was. Every
 change since then is marked `Patched for SpelaionDB (PATCHED.md, n)` in the code.
-SpelaionDB's ADR-059 says why the fork exists. The same needs are asked of the
-upstream project; the issue links go here once they are opened.
+SpelaionDB's ADR-059 says why the fork exists. The fork is ours to keep: by the
+maintainers' decision, no issues are opened upstream.
 
 1. **Cancel.** `Connection::cancel_handle()` gives a `CancelHandle` that stops, from
    another thread, the call the connection is waiting on.
