@@ -116,6 +116,9 @@ impl Client {
         message: &mut impl Message,
     ) -> Result<Response, Error> {
         message.pre_process(self);
+        // Patched for SpelaionDB (PATCHED.md, 1): a cancel asked for before this
+        // call started never reaches it.
+        self.transport.clear_cancel();
         self.send_message(message)?;
         let mut response = Response::new();
         if let Err(e) = self.receive_response(message, &mut response) {
@@ -180,7 +183,9 @@ impl Client {
                     _ => return Ok((packet, true)),
                 },
                 Err(err) => {
-                    if err.is_call_timeout_exceeded() {
+                    // Patched for SpelaionDB (PATCHED.md, 1): a cancel breaks
+                    // the call the same way as a call timeout.
+                    if err.breaks_call() {
                         let packet = self.recover_from_error(err)?;
                         return Ok((packet, false));
                     }
@@ -857,7 +862,7 @@ impl Client {
     pub(crate) fn get_call_timeout(
         &self,
     ) -> Result<Option<std::time::Duration>, Error> {
-        self.transport.get_read_timeout()
+        self.transport.get_call_timeout()
     }
 
     /// Returns the compile time capabilities.
@@ -1022,10 +1027,19 @@ impl Client {
     /// Sets the call timeout to use on the connection or an error if the
     /// connection is not currently established.
     pub(crate) fn set_call_timeout(
-        &self,
+        &mut self,
         duration: Option<std::time::Duration>,
     ) -> Result<(), Error> {
         self.transport.set_timeout(duration)
+    }
+
+    /// Patched for SpelaionDB (PATCHED.md, 1): calls on this connection can be
+    /// cancelled through `flag`.
+    pub(crate) fn enable_cancel(
+        &mut self,
+        flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<(), Error> {
+        self.transport.enable_cancel(flag)
     }
 
     /// Sets the database time zone offset.

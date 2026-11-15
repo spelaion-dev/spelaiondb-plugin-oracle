@@ -1,0 +1,43 @@
+# oracledb 26.0.0-beta.6, patched for SpelaionDB
+
+This is the crates.io release of Oracle's thin driver (UPL-1.0 or Apache-2.0,
+`oracledb-26.0.0-beta.6.crate`, SHA-256
+`03813952b1aeba41b54330ea0fb993c0807c785720ff0b9c3e2c8385c1eda9fe`). It is used
+through `[patch.crates-io]`, and only the library is kept: no examples, tests or
+binaries. The first commit that adds this folder holds the release as it was. Every
+change since then is marked `Patched for SpelaionDB (PATCHED.md, n)` in the code.
+SpelaionDB's ADR-059 says why the fork exists. The same needs are asked of the
+upstream project; the issue links go here once they are opened.
+
+1. **Cancel.** `Connection::cancel_handle()` gives a `CancelHandle` that stops, from
+   another thread, the call the connection is waiting on.
+   - Once a handle exists, a read waiting for the database wakes up every 100 ms
+     (`CANCEL_TICK`). The bytes read so far stay in the transport's buffer, so
+     reading goes on where it stopped.
+   - If the handle was used, the read fails with `ErrorKind::Cancelled`. The client
+     then breaks the call exactly as on a call timeout: it sends the interrupt
+     marker, resets, and discards the server's answer. The connection stays usable.
+   - Each round trip starts by clearing the flag, so a cancel asked for while
+     nothing was running never stops a later call.
+   - The call timeout still applies. It is kept apart, since the socket's read
+     timeout is now the tick, and it still bounds writes. It is measured per packet
+     waited for, not per call.
+2. **TLS server name and roots.**
+   - `Config::set_tls_server_name` gives the name the server's certificate is
+     checked against. SpelaionDB connects to a tunnel's local end (`127.0.0.1`)
+     and verifies the real host.
+   - `Config::set_tls_roots_pem` trusts only the given certificates instead of the
+     built-in roots (`webpki-roots`).
+   - A server name rustls cannot use is an error instead of a panic.
+3. **Nothing is ever printed.** The packet dump that `RSO_DEBUG_PACKETS` turned on is
+   removed with all its code. A plugin's standard output is its protocol, and
+   packets carry the logon. No environment variable can make the driver write to
+   standard output or standard error.
+4. **rustls without its default features.** `ring` is the provider (`aws-lc-rs`
+   needs CMake and NASM on Windows and is never built), both in `Cargo.toml` and
+   where the driver picks a provider when none is installed.
+
+When upgrading, start from the new release as published, and reapply each change or
+drop it where the upstream API now does the same. Then run the plugin's tests
+against Oracle Database Free: cancel (bounded with `tokio::time::timeout`), TLS
+through a tunnel, and the protocol staying clean with `RSO_DEBUG_PACKETS` set.
