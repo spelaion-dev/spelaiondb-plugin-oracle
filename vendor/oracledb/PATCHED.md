@@ -50,6 +50,11 @@ upstream project; the issue links go here once they are opened.
    SpelaionDB reads the transaction state from the driver after every statement
    (ADR-031).
 
+6. **A LOB fetched whole keeps its type's name.** By default the driver reads a CLOB,
+   NCLOB or BLOB column as LONG data, the whole value in the row, and its metadata
+   then said `LONG` or `LONG RAW`. `Metadata::data_type()` now names the declared
+   type, while the value is still read whole.
+
 When upgrading, start from the new release as published, and reapply each change or
 drop it where the upstream API now does the same. Then run the plugin's tests
 against Oracle Database Free: cancel (bounded with `tokio::time::timeout`), TLS
