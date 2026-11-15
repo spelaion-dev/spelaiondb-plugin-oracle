@@ -14,11 +14,19 @@ upstream project; the issue links go here once they are opened.
    - Once a handle exists, a read waiting for the database wakes up every 100 ms
      (`CANCEL_TICK`). The bytes read so far stay in the transport's buffer, so
      reading goes on where it stopped.
-   - If the handle was used, the read fails with `ErrorKind::Cancelled`. The client
-     then breaks the call exactly as on a call timeout: it sends the interrupt
-     marker, resets, and discards the server's answer. The connection stays usable.
-   - Each round trip starts by clearing the flag, so a cancel asked for while
-     nothing was running never stops a later call.
+   - The flag is checked before every read, so a query whose rows keep coming
+     stops too. If it is set, the read fails with `ErrorKind::Cancelled`. The
+     client then breaks the call exactly as on a call timeout: it sends the
+     interrupt marker, resets, and discards the server's answer. The connection
+     stays usable.
+   - The reset itself ignores the flag, so a cancel asked for again while it
+     runs cannot lose the connection.
+   - `CancelHandle::reset` forgets a cancel that reached no call. The plugin calls
+     it before each statement, so a cancel meant for an earlier statement never
+     stops a later one. Fetching more rows of a query is the same statement.
+   - The interrupt is in-band. The server sees it at once while it sends rows, but
+     a call that is busy on the server (a long PL/SQL sleep, measured on Oracle
+     Free 23.26) can take a few seconds to notice it.
    - The call timeout still applies. It is kept apart, since the socket's read
      timeout is now the tick, and it still bounds writes. It is measured per packet
      waited for, not per call.
@@ -36,6 +44,11 @@ upstream project; the issue links go here once they are opened.
 4. **rustls without its default features.** `ring` is the provider (`aws-lc-rs`
    needs CMake and NASM on Windows and is never built), both in `Cargo.toml` and
    where the driver picks a provider when none is installed.
+
+5. **Whether a transaction is open.** `Connection::transaction_in_progress()` reads
+   the flag the driver already keeps from each call's end status, with no round trip.
+   SpelaionDB reads the transaction state from the driver after every statement
+   (ADR-031).
 
 When upgrading, start from the new release as published, and reapply each change or
 drop it where the upstream API now does the same. Then run the plugin's tests

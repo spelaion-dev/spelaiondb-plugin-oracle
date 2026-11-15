@@ -198,6 +198,8 @@ pub(crate) struct Transport {
     cancel: Option<Arc<AtomicBool>>,
     // The call timeout, kept here once reads wake up every `CANCEL_TICK`.
     call_timeout: Option<Duration>,
+    // False while the client resets after a break: that reset must finish.
+    honour_cancel: bool,
 }
 
 // Patched for SpelaionDB (PATCHED.md, 1): how often a read waiting for the
@@ -337,6 +339,7 @@ impl Transport {
             full_packet_size: false,
             cancel: None,
             call_timeout: None,
+            honour_cancel: true,
         }
     }
 
@@ -354,18 +357,24 @@ impl Transport {
             if let Some(packet) = self.extract_packet() {
                 return Ok(packet);
             }
+            // Patched for SpelaionDB (PATCHED.md, 1): before every read, so a
+            // call whose rows keep coming is stopped too. Not while the client
+            // is resetting after a break, which must finish.
+            if self.honour_cancel
+                && let Some(flag) = &self.cancel
+                && flag.swap(false, Ordering::SeqCst)
+            {
+                return Err(Error::cancelled());
+            }
             let num_bytes = match self.read_packet() {
                 Ok(num_bytes) => num_bytes,
                 // Patched for SpelaionDB (PATCHED.md, 1): with cancels enabled a
                 // read wakes up every `CANCEL_TICK`. The bytes read so far stay
                 // in `read_buf`, so reading goes on where it stopped unless the
-                // call was cancelled or its timeout has passed.
+                // call was cancelled (seen above) or its timeout has passed.
                 Err(err) if err.is_call_timeout_exceeded() => {
-                    let Some(flag) = &self.cancel else {
+                    if self.cancel.is_none() {
                         return Err(err);
-                    };
-                    if flag.swap(false, Ordering::SeqCst) {
-                        return Err(Error::cancelled());
                     }
                     if self
                         .call_timeout
@@ -458,12 +467,10 @@ impl Transport {
         Ok(())
     }
 
-    /// Patched for SpelaionDB (PATCHED.md, 1): forgets a cancel asked for
-    /// before the call that is starting.
-    pub(crate) fn clear_cancel(&self) {
-        if let Some(flag) = &self.cancel {
-            flag.store(false, Ordering::SeqCst);
-        }
+    /// Patched for SpelaionDB (PATCHED.md, 1): whether a cancel stops reads.
+    /// Off while the client resets after a break, which must finish.
+    pub(crate) fn set_honour_cancel(&mut self, honour: bool) {
+        self.honour_cancel = honour;
     }
 
     /// Returns the call timeout: the socket's read timeout, or the one kept
